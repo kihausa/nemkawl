@@ -1,0 +1,223 @@
+name: Nemoclaw Session
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'AI Model'
+        required: true
+        default: 'kimi'
+        type: choice
+        options:
+          - nemotron
+          - glm5
+          - kimi
+          - qwen
+      chain:
+        description: 'Auto-chain next session'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
+    outputs:
+      model_name: ${{ steps.model.outputs.name }}
+      model_full: ${{ steps.model.outputs.full }}
+      tunnel_url: ${{ steps.tunnel.outputs.url }}
+      
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore Nemoclaw Config
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          mkdir -p ~/.nemoclaw/workspace
+          mkdir -p ~/.nemoclaw/credentials
+          if [ -n "${{ secrets.NEMOCLAW_CONFIG }}" ]; then
+            echo '${{ secrets.NEMOCLAW_CONFIG }}' > ~/.nemoclaw/openclaw.json
+            echo "✅ Restored previous config"
+          else
+            echo "ℹ️ No previous config (first run)"
+          fi
+
+      - name: Restore Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.npm-global
+            ~/.nemoclaw/workspace
+          key: nemoclaw-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            nemoclaw-${{ runner.os }}-
+
+      - name: Set Model
+        id: model
+        run: |
+          case "${{ github.event.inputs.model }}" in
+            nemotron) MODEL="nvidia-nim-nemotron/nvidia/nemotron-3-super-120b-a12b"; MODEL_ALIAS="nemotron";;
+            glm5) MODEL="nvidia-nim-glm/z-ai/glm5"; MODEL_ALIAS="glm5";;
+            kimi) MODEL="nvidia-nim/moonshotai/kimi-k2.5"; MODEL_ALIAS="kimi";;
+            qwen) MODEL="nvidia-nim-qwen/qwen/qwen3.5-397b-a17b"; MODEL_ALIAS="qwen";;
+            *) MODEL="nvidia-nim/moonshotai/kimi-k2.5"; MODEL_ALIAS="kimi";;
+          esac
+          echo "name=$MODEL_ALIAS" >> $GITHUB_OUTPUT
+          echo "full=$MODEL" >> $GITHUB_OUTPUT
+          echo "Selected: $MODEL_ALIAS"
+
+      - name: Select Random NVIDIA Key
+        id: key
+        run: |
+          # Array of 9 keys for rotation
+          KEYS=(
+            "${{ secrets.NVIDIA_API_KEY }}"
+            "${{ secrets.NVIDIA_API_KEY_2 }}"
+            "${{ secrets.NVIDIA_API_KEY_3 }}"
+            "${{ secrets.NVIDIA_API_KEY_4 }}"
+            "${{ secrets.NVIDIA_API_KEY_5 }}"
+            "${{ secrets.NVIDIA_API_KEY_6 }}"
+            "${{ secrets.NVIDIA_API_KEY_7 }}"
+            "${{ secrets.NVIDIA_API_KEY_8 }}"
+            "${{ secrets.NVIDIA_API_KEY_9 }}"
+          )
+          # Random selection
+          INDEX=$((RANDOM % 9))
+          SELECTED="${KEYS[$INDEX]}"
+          echo "Using key index: $INDEX"
+          echo "key=$SELECTED" >> $GITHUB_OUTPUT
+          echo "key_index=$INDEX" >> $GITHUB_OUTPUT
+
+      - name: Install Nemoclaw
+        env:
+          NVIDIA_API_KEY: ${{ steps.key.outputs.key }}
+        run: |
+          npm config set prefix ~/.npm-global
+          npm install -g openclaw localtunnel
+          export PATH="$HOME/.npm-global/bin:$PATH"
+          openclaw --version || echo "Nemoclaw installed"
+
+      - name: Generate Configs
+        env:
+          NVIDIA_API_KEY: ${{ steps.key.outputs.key }}
+        run: |
+          mkdir -p ~/.nemoclaw/credentials ~/.nemoclaw/workspace
+          cat > ~/.nemoclaw/credentials.json << EOF
+          {
+            "github": {"token": "${{ secrets.GH_PAT }}"},
+            "nvidia": {"api_key": "${{ steps.key.outputs.key }}"}
+          }
+          EOF
+          cat > ~/.nemoclaw/sandboxes.json << 'EOF'
+          {
+            "github-runner": {
+              "type": "local",
+              "allowed": [
+                "web_search",
+                "web_fetch",
+                "exec",
+                "write",
+                "read",
+                "edit",
+                "browser",
+                "canvas",
+                "cron",
+                "message",
+                "sessions_spawn",
+                "subagents"
+              ],
+              "timeout": 300
+            }
+          }
+          EOF
+
+      - name: Start Tunnel
+        id: tunnel
+        run: |
+          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared tunnel --url http://localhost:4321 &>/tmp/tunnel.log &
+          for i in {1..30}; do
+            URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/tunnel.log | head -1)
+            [ -n "$URL" ] && echo "url=$URL" >> $GITHUB_OUTPUT && echo "Tunnel: $URL" && break
+            sleep 2
+          done
+          [ -z "$URL" ] && npx localtunnel --port 4321 &>/tmp/lt.log &
+          for i in {1..30}; do
+            URL=$(grep -oP 'https://[a-z]+\.loca\.lt' /tmp/lt.log | head -1)
+            [ -n "$URL" ] && echo "url=$URL" >> $GITHUB_OUTPUT && echo "Tunnel: $URL" && break
+            sleep 2
+          done
+
+      - name: Run Session
+        id: runner
+        env:
+          OPENCLAW_MODEL: ${{ steps.model.outputs.full }}
+          NVIDIA_API_KEY: ${{ steps.key.outputs.key }}
+        run: |
+          export PATH="$HOME/.npm-global/bin:$PATH"
+          echo "NVIDIA_API_KEY=***$(echo ${{ steps.key.outputs.key }} | tail -c 8)" 
+          echo "Key Index Used: ${{ steps.key.outputs.key_index }}"
+          START_TIME=$(date +%s)
+          END_TIME=$((START_TIME + 20700))
+          touch ~/.nemoclaw/.keepalive
+          while [ $(date +%s) -lt $END_TIME ]; do
+            echo "[$(date -Iseconds)] Session active - Model: ${{ steps.model.outputs.name }} - Key #[${{ steps.key.outputs.key_index }}]"
+            touch ~/.nemoclaw/.keepalive
+            sleep 300
+          done
+          echo "Session completed"
+
+      - name: Save Config
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -f ~/.nemoclaw/openclaw.json ]; then
+            gh secret set NEMOCLAW_CONFIG -R "${{ github.repository }}" < ~/.nemoclaw/openclaw.json
+            echo "✅ Config saved"
+          fi
+
+      - name: Chain Next Session
+        if: ${{ github.event.inputs.chain == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          curl -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/nemoclaw.yml/dispatches \
+            -d "{\"ref\":\"main\",\"inputs\":{\"model\":\"${{ github.event.inputs.model }}\",\"chain\":\"true\"}}"
+          echo "✅ Next session chained"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          find ~/.nemoclaw/workspace -type f -size +10M -delete 2>/dev/null || true
+          rm -f ~/.nemoclaw/workspace/*.tmp 2>/dev/null || true
+
+      - name: Upload Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nemoclaw-workspace-${{ steps.model.outputs.name }}-${{ github.run_id }}
+          path: ~/.nemoclaw/workspace
+          retention-days: 30
+
+      - name: Save Cache
+        if: always()
+        uses: actions/cache/save@v4
