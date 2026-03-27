@@ -90,32 +90,40 @@ jobs:
         run: |
           mkdir -p ~/.nemoclaw
           CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
-          
-          # Pre-approve your user ID (612867689) in OpenClaw config
-          cat > ~/.nemoclaw/openclaw.json << 'OPENCNF'
-          {
-            "pairing": {
-              "mode": "auto-approve",
-              "allowedSenders": ["612867689"]
-            },
-            "telegram": {
-              "enabled": true,
-              "botToken": "${{ secrets.TELEGRAM_BOT_TOKEN }}",
-              "polling": true
-            }
-          }
-          OPENCNF
+          BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
           
           cat > ~/.nemoclaw/credentials.json << EOF
           {
             "github": {"token": "${{ secrets.GH_PAT }}"},
             "telegram": {
-              "bot_token": "${{ secrets.TELEGRAM_BOT_TOKEN }}",
+              "bot_token": "$BOT_TOKEN",
               "chat_id": "$CHAT_ID"
             }
           }
           EOF
           echo '{"runner":{"type":"local","allowed":["web_search","web_fetch","exec","write","read","edit","browser","canvas","cron","message"],"timeout":300}}' > ~/.nemoclaw/sandboxes.json
+
+      - name: Pre-approve Pairing
+        run: |
+          # Create a script that watches for pairing codes and approves them
+          cat > /tmp/pairing-watcher.sh << 'WATCHER'
+          #!/bin/bash
+          export PATH="$HOME/.npm-global/bin:$PATH"
+          sleep 5
+          for i in $(seq 1 60); do
+            if [ -f ~/.nemoclaw/gateway.log ]; then
+              CODE=$(grep -oP 'Pairing code: \K[A-Z0-9]+' ~/.nemoclaw/gateway.log 2>/dev/null | tail -1)
+              if [ -n "$CODE" ]; then
+                echo "Approving pairing code: $CODE"
+                openclaw pairing approve telegram "$CODE" 2>/dev/null || true
+                break
+              fi
+            fi
+            sleep 2
+          done
+          WATCHER
+          chmod +x /tmp/pairing-watcher.sh
+          nohup /tmp/pairing-watcher.sh > /tmp/pairing-watcher.log 2>&1 &
 
       - name: Tunnel
         id: tunnel
@@ -145,18 +153,26 @@ jobs:
           export PATH="$HOME/.npm-global/bin:$PATH"
           nohup openclaw gateway --allow-unconfigured > ~/.nemoclaw/gateway.log 2>&1 &
           
-          # Wait for startup
-          for i in $(seq 1 30); do
+          # Wait for gateway to show pairing code and get approved
+          for i in $(seq 1 45); do
             sleep 2
+            # Check if gateway is healthy = pairing was approved
             if curl -sf http://localhost:18789/health > /dev/null 2>&1; then
-              echo "Gateway ready"
+              echo "Gateway ready and paired!"
               exit 0
+            fi
+            # Show pairing status from log
+            if [ -f ~/.nemoclaw/gateway.log ]; then
+              PAIRING=$(grep "Pairing code:" ~/.nemoclaw/gateway.log 2>/dev/null | tail -1 || true)
+              [ -n "$PAIRING" ] && echo "Waiting for approval: $PAIRING"
             fi
             echo "Waiting for gateway... ($i)"
           done
           
           echo "Gateway startup timeout"
           tail -100 ~/.nemoclaw/gateway.log
+          echo "Pairing watcher log:"
+          cat /tmp/pairing-watcher.log 2>/dev/null || true
           exit 1
 
       - name: Run
