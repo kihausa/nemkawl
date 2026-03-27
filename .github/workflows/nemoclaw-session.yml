@@ -47,7 +47,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Map model to config
         id: model
@@ -107,7 +107,7 @@ jobs:
           echo "JOB_START=$(date +%s)" >> "$GITHUB_OUTPUT"
           echo "Session: $SESSION_ID | Model: ${{ steps.model.outputs.sandbox_name }}"
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
 
@@ -215,9 +215,134 @@ EOF
           echo "Sandbox started"
           nemoclaw "$SANDBOX_NAME" status
 
-      - name: Start Telegram bridge
+      - name: Setup Tunnel
+        id: tunnel
+        run: |
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared tunnel --url http://localhost:${{ env.NEMOCLAW_PORT }} &>/tmp/cloudflared.log &
+          
+          TUNNEL_URL=""
+          for i in $(seq 1 30); do
+            sleep 2
+            TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -1)
+            if [ -n "$TUNNEL_URL" ]; then
+              echo "url=$TUNNEL_URL" >> "$GITHUB_OUTPUT"
+              echo "Tunnel established: $TUNNEL_URL"
+              break
+            fi
+          done
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "url=none" >> "$GITHUB_OUTPUT"
+            echo "Warning: No tunnel established"
+          fi
+
+      - name: Start Gateway
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_POLLING: "true"
         run: |
           export PATH="$HOME/.npm-global/bin:$PATH"
-          SANDB
+          export PLAYWRIGHT_BROWSERS_PATH="$HOME/.playwright-browsers"
+          SANDBOX_NAME="${{ steps.model.outputs.sandbox_name }}"
+          
+          # Start gateway in background
+          nohup nemoclaw gateway --port ${{ env.NEMOCLAW_PORT }} > ~/.nemoclaw/gateway.log 2>&1 &
+          
+          # Wait for gateway to be ready
+          for i in $(seq 1 45); do
+            sleep 2
+            if curl -sf http://localhost:${{ env.NEMOCLAW_PORT }}/health > /dev/null 2>&1; then
+              echo "Gateway is ready!"
+              exit 0
+            fi
+            echo "Waiting for gateway... ($i)"
+            if [ -f ~/.nemoclaw/gateway.log ]; then
+              tail -5 ~/.nemoclaw/gateway.log 2>/dev/null || true
+            fi
+          done
+          
+          echo "Gateway startup timeout"
+          cat ~/.nemoclaw/gateway.log 2>/dev/null || true
+          exit 1
+
+      - name: Run Session
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          export PATH="$HOME/.npm-global/bin:$PATH"
+          
+          SESSION_ID="${{ steps.session.outputs.SESSION_ID }}"
+          CHAIN_COUNT="${{ steps.session.outputs.CHAIN_COUNT }}"
+          MODEL="${{ env.SELECTED_MODEL }}"
+          CACHE_VERSION="${{ steps.session.outputs.NEMOCLAW_CACHE_VERSION }}"
+          
+          START_TIME=$(date +%s)
+          SESSION_END=$((START_TIME + 21300))    # 5h 55min total session
+          CHAIN_TRIGGER=$((START_TIME + ${{ env.CHAIN_TRIGGER_MINUTES }} * 60))
+          NEXT_SAVE=$((START_TIME + ${{ env.SAVE_INTERVAL_MINUTES }} * 60))
+          
+          CHAINED=false
+          
+          echo "Session: $SESSION_ID | Model: $MODEL | Chain: $CHAIN_COUNT"
+          echo "Tunnel: ${{ steps.tunnel.outputs.url }}"
+          
+          while [ $(date +%s) -lt $SESSION_END ]; do
+            NOW=$(date +%s)
+            
+            # Health check
+            if curl -sf http://localhost:${{ env.NEMOCLAW_PORT }}/health > /dev/null 2>&1; then
+              echo "[$(date -Iseconds)] Health: OK | Model: $MODEL"
+            else
+              echo "[$(date -Iseconds)] Health: FAIL - attempting restart"
+              nemoclaw gateway --port ${{ env.NEMOCLAW_PORT }} &
+              sleep 10
+            fi
+            
+            # Trigger chain before timeout
+            if [ "$CHAINED" = "false" ] && [ $NOW -ge $CHAIN_TRIGGER ]; then
+              echo "Triggering chain workflow..."
+              NEXT_CHAIN=$((CHAIN_COUNT + 1))
+              
+              curl -X POST \
+                -H "Authorization: token $GH_PAT" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/workflows/nemoclaw-session-4models.yml/dispatches" \
+                -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"session_id\":\"$SESSION_ID\",\"chain_count\":\"$NEXT_CHAIN\",\"nemoclaw_cache_version\":\"$CACHE_VERSION\",\"model\":\"$MODEL\"}}" \
+                && echo "Chain triggered successfully" \
+                || echo "Chain trigger failed"
+              
+              CHAINED=true
+            fi
+            
+            sleep 60
+          done
+          
+          echo "Session completed"
+
+      - name: Save npm cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.npm-global
+          key: npm-global-nemoclaw-${{ steps.session.outputs.NEMOCLAW_CACHE_VERSION }}-${{ runner.os }}
+
+      - name: Save Playwright cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.playwright-browsers
+          key: playwright-browsers-v1-${{ runner.os }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nemoclaw-logs-${{ steps.model.outputs.sandbox_name }}-${{ steps.session.outputs.SESSION_ID }}
+          path: |
+            ~/.nemoclaw/*.log
+            /tmp/cloudflared.log
+          retention-days: 7
+          if-no-files-found: ignore
