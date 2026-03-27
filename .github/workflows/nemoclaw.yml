@@ -112,11 +112,13 @@ jobs:
           fi
 
       - name: Gateway
+        env:
+          OPENCLAW_PORT: ${{ env.PORT }}
         run: |
           export PATH="$HOME/.npm-global/bin:$PATH"
-          nohup openclaw gateway start --port ${{ env.PORT }} > ~/.nemoclaw/gateway.log 2>&1 &
-          sleep 8
-          curl -sf http://localhost:${{ env.PORT }}/health && echo "Gateway ready" || (tail ~/.nemoclaw/gateway.log && exit 1)
+          nohup openclaw gateway start > ~/.nemoclaw/gateway.log 2>&1 &
+          sleep 10
+          curl -sf http://localhost:${{ env.PORT }}/health && echo "Gateway ready" || (tail -50 ~/.nemoclaw/gateway.log && exit 1)
 
       - name: Run
         run: |
