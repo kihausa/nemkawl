@@ -86,9 +86,31 @@ jobs:
           npm install -g openclaw localtunnel playwright
           npx playwright install chromium
 
-      - run: |
-          echo '{"github":{"token":"${{ secrets.GH_PAT }}"}}' > ~/.nemoclaw/credentials.json
+      - name: Write Configs
+        run: |
+          mkdir -p ~/.nemoclaw
+          CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
+          cat > ~/.nemoclaw/credentials.json << EOF
+          {
+            "github": {"token": "${{ secrets.GH_PAT }}"},
+            "telegram": {
+              "bot_token": "${{ secrets.TELEGRAM_BOT_TOKEN }}",
+              "chat_id": "$CHAT_ID"
+            }
+          }
+          EOF
           echo '{"runner":{"type":"local","allowed":["web_search","web_fetch","exec","write","read","edit","browser","canvas","cron","message"],"timeout":300}}' > ~/.nemoclaw/sandboxes.json
+          
+          # Also write channels config for OpenClaw
+          cat > ~/.nemoclaw/channels.json << EOF
+          {
+            "telegram": {
+              "enabled": true,
+              "bot_token": "${{ secrets.TELEGRAM_BOT_TOKEN }}",
+              "chat_id": "$CHAT_ID"
+            }
+          }
+          EOF
 
       - name: Tunnel
         id: tunnel
@@ -121,12 +143,12 @@ jobs:
       - name: Run
         run: |
           START=$(date +%s)
-          END=$((START + 20520))
-          CHAIN_AT=$((START + 19800))
+          END=$((START + 21300))      # 5h 55min - session end
+          CHAIN_AT=$((START + 21000)) # 5h 50min - trigger chain (10min before timeout)
           
           while [ $(date +%s) -lt $END ]; do
             NOW=$(date +%s)
-            curl -sf http://localhost:${{ env.PORT }}/health > /dev/null && echo "[$(date -Iseconds)] OK" || echo "[$(date -Iseconds)] FAIL"
+            curl -sf http://localhost:18789/health > /dev/null && echo "[$(date -Iseconds)] OK" || echo "[$(date -Iseconds)] FAIL"
             
             if [ $NOW -ge $CHAIN_AT ] && [ ! -f ~/.nemoclaw/.chained ] && [ "${{ inputs.chain }}" = "true" ]; then
               touch ~/.nemoclaw/.chained
