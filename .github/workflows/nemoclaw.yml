@@ -141,7 +141,20 @@ jobs:
         run: |
           export PATH="$HOME/.npm-global/bin:$PATH"
           nohup openclaw gateway --allow-unconfigured > ~/.nemoclaw/gateway.log 2>&1 &
-          sleep 10
+          
+          # Wait for pairing code and auto-approve
+          for i in $(seq 1 60); do
+            sleep 2
+            PAIRING=$(grep -oP 'Pairing code: [A-Z0-9]+' ~/.nemoclaw/gateway.log 2>/dev/null | tail -1 | awk '{print $3}')
+            if [ -n "$PAIRING" ]; then
+              echo "Found pairing code: $PAIRING"
+              openclaw pairing approve telegram "$PAIRING" 2>/dev/null && echo "Pairing approved!" || echo "Waiting for pairing..."
+              break
+            fi
+            curl -sf http://localhost:18789/health > /dev/null 2>&1 && echo "Gateway healthy" && break
+          done
+          
+          sleep 5
           curl -sf http://localhost:18789/health && echo "Gateway ready" || (tail -50 ~/.nemoclaw/gateway.log && exit 1)
 
       - name: Run
