@@ -1,0 +1,143 @@
+name: Nemoclaw Session
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'AI Model'
+        required: true
+        default: 'kimi'
+        type: choice
+        options:
+          - nemotron
+          - glm5
+          - kimi
+          - qwen
+      chain:
+        description: 'Auto-chain'
+        required: false
+        default: true
+        type: boolean
+      session_id:
+        description: 'Session ID'
+        required: false
+        type: string
+      chain_count:
+        description: 'Chain #'
+        required: false
+        default: '0'
+        type: string
+
+env:
+  NODE_VERSION: '22'
+  PORT: '4321'
+
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libnss3 libatk-bridge2.0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxss1 libasound2
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nemoclaw-workspace
+          path: ~/.nemoclaw/workspace-staging
+        continue-on-error: true
+
+      - name: Session Setup
+        id: meta
+        run: |
+          mkdir -p ~/.nemoclaw/workspace ~/.nemoclaw/credentials
+          [ -d ~/.nemoclaw/workspace-staging ] && cp -r ~/.nemoclaw/workspace-staging/* ~/.nemoclaw/workspace/ 2>/dev/null && echo "Restored"
+          
+          if [ -n "${{ inputs.session_id }}" ]; then
+            echo "session_id=${{ inputs.session_id }}" >> $GITHUB_OUTPUT
+            echo "chain_count=$(( ${{ inputs.chain_count }} + 1 ))" >> $GITHUB_OUTPUT
+          else
+            echo "session_id=nemoclaw-$(date +%s)" >> $GITHUB_OUTPUT
+            echo "chain_count=1" >> $GITHUB_OUTPUT
+          fi
+          
+          [ -n "${{ secrets.NEMOCLAW_CONFIG }}" ] && echo '${{ secrets.NEMOCLAW_CONFIG }}' > ~/.nemoclaw/openclaw.json
+
+      - name: Set Model
+        id: model
+        run: |
+          case "${{ inputs.model }}" in
+            nemotron) echo "full=nvidia-nim-nemotron/nvidia/nemotron-3-super-120b-a12b" >> $GITHUB_OUTPUT ;;
+            glm5) echo "full=nvidia-nim-glm/z-ai/glm5" >> $GITHUB_OUTPUT ;;
+            qwen) echo "full=nvidia-nim-qwen/qwen/qwen3.5-397b-a17b" >> $GITHUB_OUTPUT ;;
+            *) echo "full=nvidia-nim/moonshotai/kimi-k2.5" >> $GITHUB_OUTPUT ;;
+          esac
+          echo "name=${{ inputs.model }}" >> $GITHUB_OUTPUT
+
+      - run: |
+          npm config set prefix ~/.npm-global
+          npm install -g openclaw localtunnel playwright
+          npx playwright install chromium
+
+      - run: |
+          echo '{"github":{"token":"${{ secrets.GH_PAT }}"}}' > ~/.nemoclaw/credentials.json
+          echo '{"runner":{"type":"local","allowed":["web_search","web_fetch","exec","write","read","edit","browser","canvas","cron","message"],"timeout":300}}' > ~/.nemoclaw/sandboxes.json
+
+      - name: Tunnel
+        id: tunnel
+        run: |
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cf
+          chmod +x /tmp/cf
+          /tmp/cf tunnel --url http://localhost:${{ env.PORT }} &>/tmp/cf.log &
+          for i in {1..30}; do
+            sleep 2
+            URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf.log 2>/dev/null | head -1)
+            [ -n "$URL" ] && { echo "url=$URL" >> $GITHUB_OUTPUT; echo "Tunnel: $URL"; break; }
+          done
+          [ -z "$URL" ] && echo "url=none" >> $GITHUB_OUTPUT
+
+      - name: Gateway
+        run: |
+          export PATH="$HOME/.npm-global/bin:$PATH"
+          nohup openclaw gateway start --port ${{ env.PORT }} > ~/.nemoclaw/gateway.log 2>&1 &
+          sleep 8
+          curl -sf http://localhost:${{ env.PORT }}/health && echo "Gateway ready" || (tail ~/.nemoclaw/gateway.log && exit 1)
+
+      - name: Run
+        run: |
+          START=$(date +%s)
+          END=$((START + 20520))
+          CHAIN_AT=$((START + 19800))
+          
+          while [ $(date +%s) -lt $END ]; do
+            NOW=$(date +%s)
+            curl -sf http://localhost:${{ env.PORT }}/health > /dev/null && echo "[$(date -Iseconds)] OK" || echo "[$(date -Iseconds)] FAIL"
+            
+            if [ $NOW -ge $CHAIN_AT ] && [ ! -f ~/.nemoclaw/.chained ] && [ "${{ inputs.chain }}" = "true" ]; then
+              touch ~/.nemoclaw/.chained
+              curl -X POST \
+                -H "Authorization: token ${{ secrets.GH_PAT }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/workflows/nemoclaw.yml/dispatches" \
+                -d '{"ref":"${{ github.ref_name }}","inputs":{"model":"${{ inputs.model }}","chain":"true","session_id":"${{ steps.meta.outputs.session_id }}"}}'
+              echo "Chained"
+            fi
+            sleep 60
+          done
+          echo "Done"
+
+      - if: always()
+        run: '[ -f ~/.nemoclaw/openclaw.json ] && gh secret set NEMOCLAW_CONFIG -R "${{ github.repository }}" < ~/.nemoclaw/openclaw.json || true'
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nemoclaw-workspace
+          path: ~/.nemoclaw/workspace
+          retention-days: 90
+          overwrite: true
