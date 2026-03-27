@@ -134,6 +134,10 @@ jobs:
           fi
 
       - name: Gateway
+        env:
+          TELEGRAM_POLLING: "true"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           export PATH="$HOME/.npm-global/bin:$PATH"
           nohup openclaw gateway --allow-unconfigured > ~/.nemoclaw/gateway.log 2>&1 &
