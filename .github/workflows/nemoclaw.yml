@@ -96,12 +96,20 @@ jobs:
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cf
           chmod +x /tmp/cf
           /tmp/cf tunnel --url http://localhost:${{ env.PORT }} &>/tmp/cf.log &
-          for i in {1..30}; do
+          URL=""
+          for i in $(seq 1 30); do
             sleep 2
             URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf.log 2>/dev/null | head -1)
-            [ -n "$URL" ] && { echo "url=$URL" >> $GITHUB_OUTPUT; echo "Tunnel: $URL"; break; }
+            if [ -n "$URL" ]; then
+              echo "url=$URL" >> $GITHUB_OUTPUT
+              echo "Tunnel: $URL"
+              break
+            fi
           done
-          [ -z "$URL" ] && echo "url=none" >> $GITHUB_OUTPUT
+          if [ -z "$URL" ]; then
+            echo "url=none" >> $GITHUB_OUTPUT
+            echo "No tunnel established"
+          fi
 
       - name: Gateway
         run: |
