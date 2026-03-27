@@ -164,37 +164,39 @@ jobs:
           SANDBOX_NAME="${{ steps.model.outputs.sandbox_name }}"
           
           # Create credentials.json
-          cat > "$NEMOCLAW_DIR/credentials.json" << EOF
-{
-  "version": 1,
-  "providers": {
-    "nvidia": {
-      "endpoint": "https://integrate.api.nvidia.com/v1",
-      "model": "$MODEL_ID",
-      "apiKey": "$API_KEY"
-    }
-  }
-}
-EOF
+          cat > "$NEMOCLAW_DIR/credentials.json" << 'CREDENTIALS'
+          {
+            "version": 1,
+            "providers": {
+              "nvidia": {
+                "endpoint": "https://integrate.api.nvidia.com/v1",
+                "model": "MODEL_PLACEHOLDER",
+                "apiKey": "KEY_PLACEHOLDER"
+              }
+            }
+          }
+          CREDENTIALS
+          sed -i "s|MODEL_PLACEHOLDER|$MODEL_ID|g; s|KEY_PLACEHOLDER|$API_KEY|g" "$NEMOCLAW_DIR/credentials.json"
           
           # Create sandboxes.json
-          cat > "$NEMOCLAW_DIR/sandboxes.json" << EOF
-{
-  "version": 1,
-  "default": "$SANDBOX_NAME",
-  "sandboxes": {
-    "$SANDBOX_NAME": {
-      "name": "$SANDBOX_NAME",
-      "model": "$MODEL_ID",
-      "provider": "nvidia",
-      "endpoint": "https://integrate.api.nvidia.com/v1",
-      "gatewayPort": 18789,
-      "browserPort": 18800,
-      "status": "configured"
-    }
-  }
-}
-EOF
+          cat > "$NEMOCLAW_DIR/sandboxes.json" << 'SANDBOXES'
+          {
+            "version": 1,
+            "default": "SANDBOX_PLACEHOLDER",
+            "sandboxes": {
+              "SANDBOX_PLACEHOLDER": {
+                "name": "SANDBOX_PLACEHOLDER",
+                "model": "MODEL_PLACEHOLDER",
+                "provider": "nvidia",
+                "endpoint": "https://integrate.api.nvidia.com/v1",
+                "gatewayPort": 18789,
+                "browserPort": 18800,
+                "status": "configured"
+              }
+            }
+          }
+          SANDBOXES
+          sed -i "s|SANDBOX_PLACEHOLDER|$SANDBOX_NAME|g; s|MODEL_PLACEHOLDER|$MODEL_ID|g" "$NEMOCLAW_DIR/sandboxes.json"
           
           # Write OpenClaw config
           if [ -n "$NEMOCLAW_CONFIG" ]; then
