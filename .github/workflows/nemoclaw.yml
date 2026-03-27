@@ -90,6 +90,22 @@ jobs:
         run: |
           mkdir -p ~/.nemoclaw
           CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
+          
+          # Pre-approve your user ID (612867689) in OpenClaw config
+          cat > ~/.nemoclaw/openclaw.json << 'OPENCNF'
+          {
+            "pairing": {
+              "mode": "auto-approve",
+              "allowedSenders": ["612867689"]
+            },
+            "telegram": {
+              "enabled": true,
+              "botToken": "${{ secrets.TELEGRAM_BOT_TOKEN }}",
+              "polling": true
+            }
+          }
+          OPENCNF
+          
           cat > ~/.nemoclaw/credentials.json << EOF
           {
             "github": {"token": "${{ secrets.GH_PAT }}"},
@@ -100,17 +116,6 @@ jobs:
           }
           EOF
           echo '{"runner":{"type":"local","allowed":["web_search","web_fetch","exec","write","read","edit","browser","canvas","cron","message"],"timeout":300}}' > ~/.nemoclaw/sandboxes.json
-          
-          # Also write channels config for OpenClaw
-          cat > ~/.nemoclaw/channels.json << EOF
-          {
-            "telegram": {
-              "enabled": true,
-              "bot_token": "${{ secrets.TELEGRAM_BOT_TOKEN }}",
-              "chat_id": "$CHAT_ID"
-            }
-          }
-          EOF
 
       - name: Tunnel
         id: tunnel
@@ -136,26 +141,23 @@ jobs:
       - name: Gateway
         env:
           TELEGRAM_POLLING: "true"
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           export PATH="$HOME/.npm-global/bin:$PATH"
           nohup openclaw gateway --allow-unconfigured > ~/.nemoclaw/gateway.log 2>&1 &
           
-          # Wait for pairing code and auto-approve
-          for i in $(seq 1 60); do
+          # Wait for startup
+          for i in $(seq 1 30); do
             sleep 2
-            PAIRING=$(grep -oP 'Pairing code: [A-Z0-9]+' ~/.nemoclaw/gateway.log 2>/dev/null | tail -1 | awk '{print $3}')
-            if [ -n "$PAIRING" ]; then
-              echo "Found pairing code: $PAIRING"
-              openclaw pairing approve telegram "$PAIRING" 2>/dev/null && echo "Pairing approved!" || echo "Waiting for pairing..."
-              break
+            if curl -sf http://localhost:18789/health > /dev/null 2>&1; then
+              echo "Gateway ready"
+              exit 0
             fi
-            curl -sf http://localhost:18789/health > /dev/null 2>&1 && echo "Gateway healthy" && break
+            echo "Waiting for gateway... ($i)"
           done
           
-          sleep 5
-          curl -sf http://localhost:18789/health && echo "Gateway ready" || (tail -50 ~/.nemoclaw/gateway.log && exit 1)
+          echo "Gateway startup timeout"
+          tail -100 ~/.nemoclaw/gateway.log
+          exit 1
 
       - name: Run
         run: |
