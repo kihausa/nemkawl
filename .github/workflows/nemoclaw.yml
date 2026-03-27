@@ -1,5 +1,4 @@
 name: Nemoclaw Session
-
 on:
   workflow_dispatch:
     inputs:
@@ -8,11 +7,7 @@ on:
         required: true
         default: 'kimi'
         type: choice
-        options:
-          - nemotron
-          - glm5
-          - kimi
-          - qwen
+        options: [nemotron, glm5, kimi, qwen]
       chain:
         description: 'Auto-chain'
         required: false
@@ -49,149 +44,109 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: nemoclaw-workspace
-          path: ~/.nemoclaw/workspace-staging
+          path: ~/.openclaw-staging
         continue-on-error: true
 
-      - name: Session Setup
+      - name: Setup
         id: meta
         env:
           CONFIG_DATA: ${{ secrets.NEMOCLAW_CONFIG }}
         run: |
-          mkdir -p ~/.nemoclaw/workspace ~/.nemoclaw/credentials
-          [ -d ~/.nemoclaw/workspace-staging ] && cp -r ~/.nemoclaw/workspace-staging/* ~/.nemoclaw/workspace/ 2>/dev/null && echo "Restored"
-          
+          mkdir -p ~/.openclaw ~/.nemoclaw/workspace
+          [ -d ~/.openclaw-staging ] && cp -r ~/.openclaw-staging/* ~/.openclaw/ 2>/dev/null && echo "Restored" || true
           if [ -n "${{ inputs.session_id }}" ]; then
             echo "session_id=${{ inputs.session_id }}" >> $GITHUB_OUTPUT
-            echo "chain_count=$(( ${{ inputs.chain_count }} + 1 ))" >> $GITHUB_OUTPUT
+            echo "next_chain=$(( ${{ inputs.chain_count }} + 1 ))" >> $GITHUB_OUTPUT
           else
             echo "session_id=nemoclaw-$(date +%s)" >> $GITHUB_OUTPUT
-            echo "chain_count=1" >> $GITHUB_OUTPUT
+            echo "next_chain=1" >> $GITHUB_OUTPUT
           fi
-          
-          [ -n "$CONFIG_DATA" ] && echo "$CONFIG_DATA" > ~/.nemoclaw/openclaw.json
+          [ -n "$CONFIG_DATA" ] && echo "$CONFIG_DATA" > ~/.openclaw/config.json
 
-      - name: Set Model
+      - name: Model
         id: model
         run: |
           case "${{ inputs.model }}" in
-            nemotron) echo "full=nvidia-nim-nemotron/nvidia/nemotron-3-super-120b-a12b" >> $GITHUB_OUTPUT ;;
-            glm5) echo "full=nvidia-nim-glm/z-ai/glm5" >> $GITHUB_OUTPUT ;;
-            qwen) echo "full=nvidia-nim-qwen/qwen/qwen3.5-397b-a17b" >> $GITHUB_OUTPUT ;;
-            *) echo "full=nvidia-nim/moonshotai/kimi-k2.5" >> $GITHUB_OUTPUT ;;
+            nemotron) M="nvidia-nim-nemotron/nvidia/nemotron-3-super-120b-a12b" ;;
+            glm5) M="nvidia-nim-glm/z-ai/glm5" ;;
+            qwen) M="nvidia-nim-qwen/qwen/qwen3.5-397b-a17b" ;;
+            *) M="nvidia-nim/moonshotai/kimi-k2.5" ;;
           esac
           echo "name=${{ inputs.model }}" >> $GITHUB_OUTPUT
+          echo "full=$M" >> $GITHUB_OUTPUT
 
       - run: |
           npm config set prefix ~/.npm-global
           npm install -g openclaw localtunnel playwright
           npx playwright install chromium
 
-      - name: Write Configs
+      - name: Configs
         run: |
-          mkdir -p ~/.nemoclaw
-          CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
+          mkdir -p ~/.openclaw ~/.nemoclaw
           BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
-          
-          cat > ~/.nemoclaw/credentials.json << EOF
-          {
-            "github": {"token": "${{ secrets.GH_PAT }}"},
-            "telegram": {
-              "bot_token": "$BOT_TOKEN",
-              "chat_id": "$CHAT_ID"
-            }
-          }
-          EOF
-          echo '{"runner":{"type":"local","allowed":["web_search","web_fetch","exec","write","read","edit","browser","canvas","cron","message"],"timeout":300}}' > ~/.nemoclaw/sandboxes.json
+          CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
+          echo "{\"telegram\":{\"enabled\":true,\"botToken\":\"$BOT_TOKEN\",\"polling\":true}}" > ~/.openclaw/channels.json
+          echo "{\"github\":{\"token\":\"${{ secrets.GH_PAT }}\"}}" > ~/.openclaw/credentials.json
+          echo "{\"github\":{\"token\":\"${{ secrets.GH_PAT }}\"},\"telegram\":{\"bot_token\":\"$BOT_TOKEN\",\"chat_id\":\"$CHAT_ID\"}}" > ~/.nemoclaw/credentials.json
+          echo "{\"runner\":{\"type\":\"local\",\"allowed\":[\"web_search\",\"web_fetch\",\"exec\",\"write\",\"read\",\"edit\",\"browser\",\"canvas\",\"cron\",\"message\"],\"timeout\":300}}" > ~/.nemoclaw/sandboxes.json
 
-      - name: Pre-approve Pairing
+      - name: Pairing Watcher
         run: |
-          # Create a script that watches for pairing codes and approves them
-          cat > /tmp/pairing-watcher.sh << 'WATCHER'
-          #!/bin/bash
+          cat > /tmp/pairing.sh << 'END'
           export PATH="$HOME/.npm-global/bin:$PATH"
           sleep 5
           for i in $(seq 1 60); do
-            if [ -f ~/.nemoclaw/gateway.log ]; then
-              CODE=$(grep -oP 'Pairing code: \K[A-Z0-9]+' ~/.nemoclaw/gateway.log 2>/dev/null | tail -1)
-              if [ -n "$CODE" ]; then
-                echo "Approving pairing code: $CODE"
-                openclaw pairing approve telegram "$CODE" 2>/dev/null || true
-                break
-              fi
-            fi
+            [ -f ~/.openclaw/gateway.log ] || continue
+            CODE=$(grep -oP 'Pairing code: \K[A-Z0-9]+' ~/.openclaw/gateway.log 2>/dev/null | tail -1)
+            [ -n "$CODE" ] && openclaw pairing approve telegram "$CODE" 2>/dev/null && break
             sleep 2
           done
-          WATCHER
-          chmod +x /tmp/pairing-watcher.sh
-          nohup /tmp/pairing-watcher.sh > /tmp/pairing-watcher.log 2>&1 &
+          END
+          chmod +x /tmp/pairing.sh
+          nohup /tmp/pairing.sh > /tmp/pairing.log 2>&1 &
 
       - name: Tunnel
         id: tunnel
         run: |
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cf
           chmod +x /tmp/cf
-          /tmp/cf tunnel --url http://localhost:${{ env.PORT }} &>/tmp/cf.log &
-          URL=""
+          /tmp/cf tunnel --url http://localhost:18789 &>/tmp/cf.log &
           for i in $(seq 1 30); do
             sleep 2
             URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf.log 2>/dev/null | head -1)
-            if [ -n "$URL" ]; then
-              echo "url=$URL" >> $GITHUB_OUTPUT
-              echo "Tunnel: $URL"
-              break
-            fi
+            [ -n "$URL" ] && { echo "url=$URL" >> $GITHUB_OUTPUT; echo "Tunnel: $URL"; break; }
           done
-          if [ -z "$URL" ]; then
-            echo "url=none" >> $GITHUB_OUTPUT
-            echo "No tunnel established"
-          fi
+          [ -z "$URL" ] && echo "url=none" >> $GITHUB_OUTPUT
 
       - name: Gateway
-        env:
-          TELEGRAM_POLLING: "true"
         run: |
           export PATH="$HOME/.npm-global/bin:$PATH"
-          nohup openclaw gateway --allow-unconfigured > ~/.nemoclaw/gateway.log 2>&1 &
-          
-          # Wait for gateway to show pairing code and get approved
+          mkdir -p ~/.openclaw
+          nohup openclaw gateway --allow-unconfigured > ~/.openclaw/gateway.log 2>&1 &
           for i in $(seq 1 45); do
             sleep 2
-            # Check if gateway is healthy = pairing was approved
-            if curl -sf http://localhost:18789/health > /dev/null 2>&1; then
-              echo "Gateway ready and paired!"
-              exit 0
-            fi
-            # Show pairing status from log
-            if [ -f ~/.nemoclaw/gateway.log ]; then
-              PAIRING=$(grep "Pairing code:" ~/.nemoclaw/gateway.log 2>/dev/null | tail -1 || true)
-              [ -n "$PAIRING" ] && echo "Waiting for approval: $PAIRING"
-            fi
-            echo "Waiting for gateway... ($i)"
+            curl -sf http://localhost:18789/health > /dev/null 2>&1 && { echo "Ready!"; grep -i telegram ~/.openclaw/gateway.log 2>/dev/null | tail -3; exit 0; }
+            PAIRING=$(grep "Pairing code:" ~/.openclaw/gateway.log 2>/dev/null | tail -1)
+            [ -n "$PAIRING" ] && echo "Waiting: $PAIRING"
+            echo "($i)"
           done
-          
-          echo "Gateway startup timeout"
-          tail -100 ~/.nemoclaw/gateway.log
-          echo "Pairing watcher log:"
-          cat /tmp/pairing-watcher.log 2>/dev/null || true
+          tail -100 ~/.openclaw/gateway.log
+          cat /tmp/pairing.log 2>/dev/null
           exit 1
 
-      - name: Run
+      - name: Loop
         run: |
           START=$(date +%s)
-          END=$((START + 21300))      # 5h 55min - session end
-          CHAIN_AT=$((START + 21000)) # 5h 50min - trigger chain (10min before timeout)
-          
+          END=$((START + 21300))
+          CHAIN_AT=$((START + 21000))
           while [ $(date +%s) -lt $END ]; do
             NOW=$(date +%s)
             curl -sf http://localhost:18789/health > /dev/null && echo "[$(date -Iseconds)] OK" || echo "[$(date -Iseconds)] FAIL"
-            
             if [ $NOW -ge $CHAIN_AT ] && [ ! -f ~/.nemoclaw/.chained ] && [ "${{ inputs.chain }}" = "true" ]; then
               touch ~/.nemoclaw/.chained
-              curl -X POST \
-                -H "Authorization: token ${{ secrets.GH_PAT }}" \
-                -H "Accept: application/vnd.github.v3+json" \
+              curl -X POST -H "Authorization: token ${{ secrets.GH_PAT }}" -H "Accept: application/vnd.github.v3+json" \
                 "https://api.github.com/repos/${{ github.repository }}/actions/workflows/nemoclaw.yml/dispatches" \
-                -d '{"ref":"${{ github.ref_name }}","inputs":{"model":"${{ inputs.model }}","chain":"true","session_id":"${{ steps.meta.outputs.session_id }}"}}'
+                -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"model\":\"${{ inputs.model }}\",\"chain\":\"true\",\"session_id\":\"${{ steps.meta.outputs.session_id }}\",\"chain_count\":\"${{ steps.meta.outputs.next_chain }}\"}}"
               echo "Chained"
             fi
             sleep 60
@@ -199,12 +154,15 @@ jobs:
           echo "Done"
 
       - if: always()
-        run: '[ -f ~/.nemoclaw/openclaw.json ] && gh secret set NEMOCLAW_CONFIG -R "${{ github.repository }}" < ~/.nemoclaw/openclaw.json || true'
+        run: |
+          [ -f ~/.openclaw/config.json ] && gh secret set NEMOCLAW_CONFIG -R "${{ github.repository }}" < ~/.openclaw/config.json 2>/dev/null || true
+          [ -f ~/.nemoclaw/openclaw.json ] && gh secret set NEMOCLAW_CONFIG -R "${{ github.repository }}" < ~/.nemoclaw/openclaw.json 2>/dev/null || true
+        continue-on-error: true
 
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nemoclaw-workspace
-          path: ~/.nemoclaw/workspace
+          path: ~/.openclaw/
           retention-days: 90
           overwrite: true
