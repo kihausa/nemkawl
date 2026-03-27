@@ -156,12 +156,15 @@ jobs:
             [ -n "$URL" ] && echo "url=$URL" >> $GITHUB_OUTPUT && echo "Tunnel: $URL" && break
             sleep 2
           done
-          [ -z "$URL" ] && npx localtunnel --port 4321 &>/tmp/lt.log &
-          for i in {1..30}; do
-            URL=$(grep -oP 'https://[a-z]+\.loca\.lt' /tmp/lt.log | head -1)
-            [ -n "$URL" ] && echo "url=$URL" >> $GITHUB_OUTPUT && echo "Tunnel: $URL" && break
-            sleep 2
-          done
+          if [ -z "$URL" ]; then
+            echo "Cloudflare failed, trying localtunnel..."
+            npx localtunnel --port 4321 &>/tmp/lt.log &
+            for i in {1..30}; do
+              [ -f /tmp/lt.log ] && URL=$(grep -oP 'https://[a-z]+\.loca\.lt' /tmp/lt.log | head -1)
+              [ -n "$URL" ] && echo "url=$URL" >> $GITHUB_OUTPUT && echo "Tunnel: $URL" && break
+              sleep 2
+            done
+          fi
 
       - name: Run Session
         id: runner
