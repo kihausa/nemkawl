@@ -54,6 +54,8 @@ jobs:
 
       - name: Session Setup
         id: meta
+        env:
+          CONFIG_DATA: ${{ secrets.NEMOCLAW_CONFIG }}
         run: |
           mkdir -p ~/.nemoclaw/workspace ~/.nemoclaw/credentials
           [ -d ~/.nemoclaw/workspace-staging ] && cp -r ~/.nemoclaw/workspace-staging/* ~/.nemoclaw/workspace/ 2>/dev/null && echo "Restored"
@@ -66,7 +68,7 @@ jobs:
             echo "chain_count=1" >> $GITHUB_OUTPUT
           fi
           
-          [ -n "${{ secrets.NEMOCLAW_CONFIG }}" ] && echo '${{ secrets.NEMOCLAW_CONFIG }}' > ~/.nemoclaw/openclaw.json
+          [ -n "$CONFIG_DATA" ] && echo "$CONFIG_DATA" > ~/.nemoclaw/openclaw.json
 
       - name: Set Model
         id: model
